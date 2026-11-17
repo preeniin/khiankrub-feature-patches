@@ -1,0 +1,232 @@
+From 349f19928b8eea0be7d16e1c8c5773c902ae7c5a Mon Sep 17 00:00:00 2001
+From: KhianKrub Plus <noreply@example.invalid>
+Date: Tue, 17 Nov 2026 19:28:55 +0700
+Subject: [PATCH] Show an object's distances from the paper edges: while
+ dragging, after an arrow-key nudge, and in the right-click menu
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../khiankrub/crates/ui-egui/src/canvas.rs    |   7 ++
+ .../crates/ui-egui/src/drag_readout.rs        | 112 ++++++++++++++++++
+ sources/khiankrub/crates/ui-egui/src/lib.rs   |   1 +
+ .../khiankrub/crates/ui-egui/src/objects.rs   |  33 +++++-
+ 4 files changed, 149 insertions(+), 4 deletions(-)
+ create mode 100644 sources/khiankrub/crates/ui-egui/src/drag_readout.rs
+
+diff --git a/sources/khiankrub/crates/ui-egui/src/canvas.rs b/sources/khiankrub/crates/ui-egui/src/canvas.rs
+index 6758a70..c455200 100644
+--- a/sources/khiankrub/crates/ui-egui/src/canvas.rs
++++ b/sources/khiankrub/crates/ui-egui/src/canvas.rs
+@@ -3110,6 +3110,13 @@ fn context_menu(app: &mut WordApp, ui: &mut Ui) {
+     if picture || object {
+         ui.separator();
+     }
++    // Where the picture, shape or text box sits on its page, without moving it.
++    if (picture || object) && let Some(lines) = crate::drag_readout::menu_lines(app) {
++        for l in lines {
++            ui.label(egui::RichText::new(l).weak());
++        }
++        ui.separator();
++    }
+     if picture {
+         item(ui, app, "Change Picture…", "ui.changePicture", json!({}));
+         item(ui, app, "Reset Picture", "picture.reset", json!({}));
+diff --git a/sources/khiankrub/crates/ui-egui/src/drag_readout.rs b/sources/khiankrub/crates/ui-egui/src/drag_readout.rs
+new file mode 100644
+index 0000000..2e7ae95
+--- /dev/null
++++ b/sources/khiankrub/crates/ui-egui/src/drag_readout.rs
+@@ -0,0 +1,112 @@
++//! The distances shown beside a picture, shape or text box while it is dragged (our addition,
++//! see OUR-CHANGES.md): how far its left and top edges are from the paper's (or, while resizing,
++//! its width and height) in the options' unit, so a drop can land on 1.5 cm by eye.
++
++use egui::{Color32, Painter, Pos2, Rect, vec2};
++use wordcraft_geom::Unit;
++
++
++/// The text of the readout: `Left: 1.5 cm   Top: 1.5 cm` (a move) or `W: …   H: …` (a resize).
++pub fn readout_text(unit: Unit, decimal: char, resizing: bool, r: wordcraft_geom::Rect) -> String {
++    let n = |pt: f32| unit.format_with(pt, decimal);
++    if resizing {
++        format!("{} {}   {} {}", tl!("W:"), n(r.w), tl!("H:"), n(r.h))
++    } else {
++        format!("{} {}   {} {}", tl!("Left:"), n(r.x), tl!("Top:"), n(r.y))
++    }
++}
++
++/// Draw the readout for an object being dragged: below its frame, above it where the page ends,
++/// kept inside the page's width. `frame` is the dragged frame on screen, `page` the page on screen.
++pub fn paint_readout(painter: &Painter, text: String, frame: Rect, page: Rect) {
++    let galley = painter.layout_no_wrap(text, egui::FontId::proportional(12.0), Color32::WHITE);
++    let (pad, gap) = (5.0, 6.0);
++    let size = galley.size() + vec2(pad * 2.0, pad);
++    let mut min = Pos2::new(frame.min.x, frame.max.y + gap);
++    if min.y + size.y > page.max.y {
++        min.y = (frame.min.y - gap - size.y).max(page.min.y);
++    }
++    min.x = min.x.min(page.max.x - size.x).max(page.min.x);
++    let rect = Rect::from_min_size(min, size);
++    painter.rect_filled(rect, egui::CornerRadius::same(4), Color32::from_rgba_unmultiplied(28, 28, 32, 232));
++    painter.galley(rect.min + vec2(pad, pad / 2.0), galley, Color32::WHITE);
++}
++
++
++/// The two lines the right-click menu of a picture, shape or text box shows: its distances from the
++/// paper's left and top edges, then from its right and bottom edges, in the options' unit.
++pub fn menu_lines(app: &mut crate::WordApp) -> Option<[String; 2]> {
++    let (pos, _) = wordcraft_engine::cmd::objects::selected(&app.session)?;
++    let hint = app.session.page_hint;
++    let layout = app.session.layout();
++    let o = layout.object(&pos, hint)?;
++    let pg = layout.pages.get(o.page)?;
++    let (unit, decimal) = (crate::options::unit(), crate::options::decimal());
++    Some(menu_text(unit, decimal, o.rect, (pg.w - pg.markup).max(0.0), pg.h))
++}
++
++fn menu_text(unit: Unit, decimal: char, r: wordcraft_geom::Rect, page_w: f32, page_h: f32) -> [String; 2] {
++    let n = |pt: f32| unit.format_with(pt, decimal);
++    [
++        readout_text(unit, decimal, false, r),
++        format!("{} {}   {} {}", tl!("Right:"), n(page_w - r.x - r.w), tl!("Bottom:"), n(page_h - r.y - r.h)),
++    ]
++}
++
++/// How long (seconds) the guides and distances stay after an arrow-key nudge.
++const NUDGE_SHOWN: f64 = 1.5;
++
++fn nudge_id() -> egui::Id {
++    egui::Id::new("drag_readout_nudge")
++}
++
++/// An arrow key just moved the selected object: show its distances for a moment, as a drag does.
++pub fn mark_nudge(ctx: &egui::Context) {
++    let now = ctx.input(|i| i.time);
++    ctx.data_mut(|d| d.insert_temp(nudge_id(), now));
++    ctx.request_repaint_after(std::time::Duration::from_secs_f64(NUDGE_SHOWN + 0.05));
++}
++
++/// Whether [`mark_nudge`] was called within the last moment.
++pub fn nudged_recently(ctx: &egui::Context) -> bool {
++    let now = ctx.input(|i| i.time);
++    ctx.data(|d| d.get_temp::<f64>(nudge_id())).is_some_and(|t| now - t < NUDGE_SHOWN)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn rect(x: f32, y: f32, w: f32, h: f32) -> wordcraft_geom::Rect {
++        wordcraft_geom::Rect::new(x, y, w, h)
++    }
++
++    /// 1.5 cm from the paper's edges reads as `1.5 cm`, in the unit the options chose.
++    #[test]
++    fn readout_shows_the_distances_in_the_options_unit() {
++        let cm = 72.0 / 2.54;
++        let s = readout_text(Unit::Centimeters, '.', false, rect(1.5 * cm, 3.0 * cm, 100.0, 50.0));
++        assert!(s.contains("1.5 cm") && s.contains("3 cm"), "{s}");
++        let s = readout_text(Unit::Millimeters, ',', true, rect(0.0, 0.0, 10.0 * cm, 2.0 * cm));
++        assert!(s.contains("100 mm") && s.contains("20 mm"), "{s}");
++    }
++
++    /// An arrow-key nudge shows the distances for a moment, then they go.
++    #[test]
++    fn a_nudge_shows_the_distances_for_a_moment() {
++        let ctx = egui::Context::default();
++        assert!(!nudged_recently(&ctx));
++        let _ = ctx.run_ui(egui::RawInput { time: Some(10.0), ..Default::default() }, |ui| { let ctx = ui.ctx(); mark_nudge(ctx) });
++        let _ = ctx.run_ui(egui::RawInput { time: Some(10.5), ..Default::default() }, |ui| { let ctx = ui.ctx(); assert!(nudged_recently(ctx)) });
++        let _ = ctx.run_ui(egui::RawInput { time: Some(12.0), ..Default::default() }, |ui| { let ctx = ui.ctx(); assert!(!nudged_recently(ctx)) });
++    }
++
++    /// The menu's second line counts from the right and bottom edges of the paper.
++    #[test]
++    fn the_menu_lines_give_all_four_distances() {
++        let cm = 72.0 / 2.54;
++        let [a, b] = menu_text(Unit::Centimeters, '.', rect(1.5 * cm, 2.0 * cm, 4.0 * cm, 3.0 * cm), 21.0 * cm, 29.7 * cm);
++        assert!(a.contains("1.5 cm") && a.contains("2 cm"), "{a}");
++        assert!(b.contains("15.5 cm") && b.contains("24.7 cm"), "{b}");
++    }
++}
+diff --git a/sources/khiankrub/crates/ui-egui/src/lib.rs b/sources/khiankrub/crates/ui-egui/src/lib.rs
+index ae7e209..ba68940 100644
+--- a/sources/khiankrub/crates/ui-egui/src/lib.rs
++++ b/sources/khiankrub/crates/ui-egui/src/lib.rs
+@@ -36,6 +36,7 @@ pub mod credits;
+ pub mod crop;
+ pub mod desktop_theme;
+ pub mod dialogs;
++pub mod drag_readout;
+ pub mod dialogs_character;
+ pub mod dialogs_chart;
+ pub mod dialogs_controls;
+diff --git a/sources/khiankrub/crates/ui-egui/src/objects.rs b/sources/khiankrub/crates/ui-egui/src/objects.rs
+index f51116f..03ec83a 100644
+--- a/sources/khiankrub/crates/ui-egui/src/objects.rs
++++ b/sources/khiankrub/crates/ui-egui/src/objects.rs
+@@ -332,10 +332,14 @@ fn snap_targets(pg: &wordcraft_layout::Page, me: &ObjectHit) -> Vec<wordcraft_ge
+ 
+ /// The guides a move snapped to: thin lines across the page (not into the balloon area).
+ fn paint_guides(d: &ObjectDrag, painter: &Painter, t: &Tokens, layout: &DocLayout, pages: &[Rect], scale: f32) {
+-    let Some(p) = pages.get(d.drag.to_page) else { return };
+-    let right = layout.pages.get(d.drag.to_page).map_or(p.max.x, |pg| (p.min.x + paper_width(pg) * scale).min(p.max.x));
++    paint_guide_lines(&d.guides, d.drag.to_page, painter, t, layout, pages, scale);
++}
++
++fn paint_guide_lines(lines: &[guides::Guide], page: usize, painter: &Painter, t: &Tokens, layout: &DocLayout, pages: &[Rect], scale: f32) {
++    let Some(p) = pages.get(page) else { return };
++    let right = layout.pages.get(page).map_or(p.max.x, |pg| (p.min.x + paper_width(pg) * scale).min(p.max.x));
+     let stroke = egui::Stroke::new(1.0, t.guide);
+-    for g in &d.guides {
++    for g in lines {
+         let line = match g.axis {
+             guides::Axis::X => [egui::pos2(p.min.x + g.at * scale, p.min.y), egui::pos2(p.min.x + g.at * scale, p.max.y)],
+             guides::Axis::Y => [egui::pos2(p.min.x, p.min.y + g.at * scale), egui::pos2(right, p.min.y + g.at * scale)],
+@@ -517,6 +521,18 @@ pub fn paint(app: &WordApp, painter: &Painter, t: &Tokens, layout: &DocLayout, p
+         }
+         return;
+     }
++    // After an arrow-key nudge: the same guides and distances as while dragging.
++    if app.canvas.obj_drag.is_none()
++        && crate::drag_readout::nudged_recently(painter.ctx())
++        && let Some((o, _)) = active(app, layout).filter(|(o, _)| o.floating())
++        && let (Some(pg), Some(to), Some(page)) = (layout.pages.get(o.page), screen(pages, scale, o.page, o.rect), pages.get(o.page))
++    {
++        let candidates = guides::candidates(paper_width(pg), pg.h, pg.body, snap_targets(pg, &o));
++        let lines = guides::snap(o.spin.bounds(o.rect), &candidates, 0.05).lines;
++        paint_guide_lines(&lines, o.page, painter, t, layout, pages, scale);
++        let text = crate::drag_readout::readout_text(crate::options::unit(), crate::options::decimal(), false, o.rect);
++        crate::drag_readout::paint_readout(painter, text, to, *page);
++    }
+     if let Some(d) = app.canvas.obj_drag.as_ref().filter(|d| d.drag.moved) {
+         let Some(to) = screen(pages, scale, d.drag.to_page, d.drag.rect) else { return };
+         if d.drag.grab == Grab::Rotate {
+@@ -536,6 +552,11 @@ pub fn paint(app: &WordApp, painter: &Painter, t: &Tokens, layout: &DocLayout, p
+         }
+         frame::paint(painter, t, to, d.drag.deg, false, false, false);
+         paint_guides(d, painter, t, layout, pages, scale);
++        // How far from the paper's edges (or how big) it is right now (drag_readout.rs).
++        if let Some(page) = pages.get(d.drag.to_page) {
++            let text = crate::drag_readout::readout_text(crate::options::unit(), crate::options::decimal(), matches!(d.drag.grab, Grab::Resize(_)), d.drag.rect);
++            crate::drag_readout::paint_readout(painter, text, to, *page);
++        }
+         return;
+     }
+     // The others selected along with it (Shift+click): their outlines.
+@@ -636,7 +657,11 @@ pub fn key(app: &mut WordApp, key: egui::Key, m: egui::Modifiers) -> bool {
+         _ => return false,
+     };
+     // Inline objects move with the text: arrows move the caret as usual.
+-    app.run("arrange.nudge", json!({"dx": dx, "dy": dy})).is_ok()
++    let ok = app.run("arrange.nudge", json!({"dx": dx, "dy": dy})).is_ok();
++    if ok && let Some(ctx) = &app.ctx {
++        crate::drag_readout::mark_nudge(ctx);
++    }
++    ok
+ }
+ 
+ /// With a text box selected, put the caret at the end of its text (typing goes there).
+-- 
+2.55.0.windows.3
+

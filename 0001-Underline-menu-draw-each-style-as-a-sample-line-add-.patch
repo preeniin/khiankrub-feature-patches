@@ -1,0 +1,120 @@
+From 641765703b59fda0bc2e4c4a6ac007af0af9ff54 Mon Sep 17 00:00:00 2001
+From: KhianKrub Plus <noreply@example.invalid>
+Date: Tue, 17 Nov 2026 19:28:54 +0700
+Subject: [PATCH] Underline menu: draw each style as a sample line, add
+ Dot-dot-dash and More Underlines
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../khiankrub/crates/ui-egui/src/i18n/th.tsv  |  2 +
+ .../khiankrub/crates/ui-egui/src/ribbon.rs    | 64 ++++++++++++++++++-
+ 2 files changed, 64 insertions(+), 2 deletions(-)
+
+diff --git a/sources/khiankrub/crates/ui-egui/src/i18n/th.tsv b/sources/khiankrub/crates/ui-egui/src/i18n/th.tsv
+index ca70df6..6603c41 100644
+--- a/sources/khiankrub/crates/ui-egui/src/i18n/th.tsv
++++ b/sources/khiankrub/crates/ui-egui/src/i18n/th.tsv
+@@ -1374,6 +1374,8 @@ template	Studio handbook (sample)	คู่มือสตูดิโอ (ต
+ 	Select Paragraph	เลือกย่อหน้า
+ 	Select Sentence	เลือกประโยค
+ 	Dot-dash	เส้นจุดประ
++	More Underlines…	เส้นใต้เพิ่มเติม…
++	Dot-dot-dash	เส้นจุดจุดประ
+ 	Small Caps	ตัวพิมพ์ใหญ่ขนาดเล็ก
+ 	All Caps	ตัวพิมพ์ใหญ่ทั้งหมด
+ 	Double Strikethrough	ขีดทับสองเส้น
+diff --git a/sources/khiankrub/crates/ui-egui/src/ribbon.rs b/sources/khiankrub/crates/ui-egui/src/ribbon.rs
+index 4422317..c1058ee 100644
+--- a/sources/khiankrub/crates/ui-egui/src/ribbon.rs
++++ b/sources/khiankrub/crates/ui-egui/src/ribbon.rs
+@@ -758,6 +758,62 @@ pub(crate) fn size_menu(ui: &mut Ui, app: &mut WordApp) {
+     mi(ui, app, crate::dialogs::PAPER_LABELS.more, "ui.dialog", json!({"name": "pageSetup"}));
+ }
+ 
++/// A row of the Underline menu: the style drawn as a line (our change). Clicking applies it.
++fn underline_sample(ui: &mut Ui, app: &mut WordApp, label: &str, style: &str) {
++    let t = crate::theme::Tokens::get(ui.ctx());
++    let (rect, resp) = ui.allocate_exact_size(vec2(170.0, 24.0), Sense::click());
++    if resp.hovered() {
++        ui.painter().rect_filled(rect, 3.0, t.hover);
++    }
++    let (x0, x1, y) = (rect.left() + 12.0, rect.right() - 12.0, rect.center().y);
++    let p = ui.painter();
++    let ink = t.text;
++    let on = |a: f32, b: f32, w: f32, dy: f32| {
++        p.line_segment([pos2(x0 + a, y + dy), pos2((x0 + b).min(x1), y + dy)], Stroke::new(w, ink));
++    };
++    // A repeating pattern of (length, drawn) pieces along the line.
++    let pattern = |pieces: &[(f32, bool)], w: f32| {
++        let mut x = 0.0;
++        'outer: loop {
++            for (len, drawn) in pieces {
++                if x0 + x >= x1 {
++                    break 'outer;
++                }
++                if *drawn {
++                    on(x, x + len, w, 0.0);
++                }
++                x += len;
++            }
++        }
++    };
++    match style {
++        "double" => {
++            on(0.0, x1 - x0, 1.2, -1.8);
++            on(0.0, x1 - x0, 1.2, 1.8);
++        }
++        "thick" => on(0.0, x1 - x0, 2.8, 0.0),
++        "dotted" => pattern(&[(1.6, true), (2.4, false)], 1.6),
++        "dash" => pattern(&[(6.0, true), (3.5, false)], 1.3),
++        "dotDash" => pattern(&[(6.0, true), (2.5, false), (1.6, true), (2.5, false)], 1.3),
++        "dotDotDash" => pattern(&[(6.0, true), (2.5, false), (1.6, true), (2.5, false), (1.6, true), (2.5, false)], 1.3),
++        "wave" => {
++            let mut pts = Vec::new();
++            let mut x = 0.0;
++            while x0 + x <= x1 {
++                pts.push(pos2(x0 + x, y + (x * std::f32::consts::TAU / 6.0).sin() * 1.8));
++                x += 0.8;
++            }
++            p.add(egui::Shape::line(pts, Stroke::new(1.2, ink)));
++        }
++        _ => on(0.0, x1 - x0, 1.3, 0.0),
++    }
++    let resp = resp.on_hover_text(tl!(label));
++    if resp.clicked() {
++        crate::widgets::run_from_ribbon(app, "format.underline", json!({"style": style}));
++        ui.close();
++    }
++}
++
+ pub(crate) fn mi(ui: &mut Ui, app: &mut WordApp, label: &str, id: &str, params: Value) {
+     mi_text(ui, app, tl!(label), id, params);
+ }
+@@ -1356,6 +1412,7 @@ fn home(app: &mut WordApp, ui: &mut Ui) {
+                 small(ui, app, "bold", None, "Bold", "format.bold", json!({}), flag("bold"));
+                 small(ui, app, "italic", None, "Italic", "format.italic", json!({}), flag("italic"));
+                 split(ui, app, "underline", "Underline", "format.underline", json!({}), flag("underline"), None, |ui, app| {
++                    // Each style is drawn as a sample line, as in Word (our change); the name is its tooltip.
+                     for (l, s) in [
+                         ("Single", "single"),
+                         ("Double", "double"),
+@@ -1363,11 +1420,14 @@ fn home(app: &mut WordApp, ui: &mut Ui) {
+                         ("Dotted", "dotted"),
+                         ("Dashed", "dash"),
+                         ("Dot-dash", "dotDash"),
++                        ("Dot-dot-dash", "dotDotDash"),
+                         ("Wave", "wave"),
+-                        ("Words only", "words"),
+                     ] {
+-                        mi(ui, app, l, "format.underline", json!({"style": s}));
++                        underline_sample(ui, app, l, s);
+                     }
++                    mi(ui, app, "Words only", "format.underline", json!({"style": "words"}));
++                    ui.separator();
++                    mi(ui, app, "More Underlines…", "format.fontDialog", json!({}));
+                 });
+                 small(ui, app, "strike", None, "Strikethrough", "format.strikethrough", json!({}), flag("strike"));
+                 small(ui, app, "subscript", None, "Subscript", "format.subscript", json!({}), flag("subscript"));
+-- 
+2.55.0.windows.3
+
